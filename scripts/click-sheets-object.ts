@@ -1,5 +1,5 @@
 import 'dotenv/config';
-import { chromium, Page, Frame, Locator } from 'playwright';
+import { chromium, Page, Frame, Locator, Dialog } from 'playwright';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as readline from 'readline';
@@ -196,9 +196,33 @@ async function clickCancelIfPresent(scope: Scope, page: Page, timeoutMs = 10000)
 }
 
 // ===== surface 뜬 뒤 확인 버튼 클릭 (OK / 확인) =====
-async function waitAndConfirm(scope: Scope, page: Page, timeoutMs: number) {
+type DialogHandleResult =
+  | 'native-accepted'
+  | 'dom-confirmed'
+  | 'dom-canceled'
+  | 'dom-no-surface'
+  | 'dom-error'
+  | 'timed-out';
+
+async function waitAndConfirm(scope: Scope, page: Page, timeoutMs: number): Promise<DialogHandleResult> {
+  let nativeAccepted = false;
+  let domConfirmed = false;
+  let domCanceled = false;
+  let domNoSurface = false;
+  let domErrored = false;
+
   const nativeDialogP = new Promise<void>((resolve) => {
-    const handler = async (d: any) => { try { await d.accept(); } finally { resolve(); } };
+    const handler = async (dialog: Dialog) => {
+      try {
+        await dialog.accept();
+        nativeAccepted = true;
+        console.log('[확인] 네이티브 dialog.accept() 완료');
+      } catch (err) {
+        console.warn('[확인] 네이티브 dialog.accept() 중 오류:', err);
+      } finally {
+        resolve();
+      }
+    };
     page.once('dialog', handler);
     setTimeout(() => resolve(), timeoutMs);
   });
@@ -208,11 +232,13 @@ async function waitAndConfirm(scope: Scope, page: Page, timeoutMs: number) {
     try {
       surface = await waitForDialogSurface(scope, timeoutMs);
     } catch {
+      domNoSurface = true;
       return;
     }
 
     const canceled = await clickCancelIfPresent(scope, page, Math.min(5000, timeoutMs)).catch(() => false);
     if (canceled) {
+      domCanceled = true;
       console.log('[확인] 취소 클릭 성공 → 확인 클릭 단계 스킵');
       return;
     }
@@ -232,6 +258,7 @@ async function waitAndConfirm(scope: Scope, page: Page, timeoutMs: number) {
     }
 
     if (!okBtn) {
+      domNoSurface = true;
       console.log('[확인] (surface 내부) 확인 버튼 없음 → 스킵');
       return;
     }
@@ -242,10 +269,22 @@ async function waitAndConfirm(scope: Scope, page: Page, timeoutMs: number) {
 
     await okBtn.scrollIntoViewIfNeeded().catch(() => {});
     await okBtn.click({ timeout: 2000 });
+    domConfirmed = true;
     console.log('[확인] (surface 내부) 버튼 클릭 완료');
-  })().catch(() => {});
+  })().catch((err) => {
+    domErrored = true;
+    console.warn('[확인] DOM 팝업 처리 중 오류:', err);
+  });
 
-  await Promise.race([nativeDialogP, domP, new Promise((r) => setTimeout(r, timeoutMs))]);
+  await Promise.race([Promise.allSettled([nativeDialogP, domP]), new Promise((r) => setTimeout(r, timeoutMs))]);
+  await Promise.allSettled([nativeDialogP, domP]);
+
+  if (nativeAccepted) return 'native-accepted';
+  if (domConfirmed) return 'dom-confirmed';
+  if (domCanceled) return 'dom-canceled';
+  if (domNoSurface) return 'dom-no-surface';
+  if (domErrored) return 'dom-error';
+  return 'timed-out';
 }
 
 // ===== 메인 실행 =====
@@ -312,10 +351,29 @@ async function waitAndConfirm(scope: Scope, page: Page, timeoutMs: number) {
     console.log(`스크린샷 저장(클릭 직후): ${firstShot}`);
 
     // 팝업 처리 (취소 우선, surface 내부 한정)
-    await waitAndConfirm(scope, page, CONFIRM_TIMEOUT_MS);
+    const dialogResult = await waitAndConfirm(scope, page, CONFIRM_TIMEOUT_MS);
 
     await page.waitForTimeout(800);
-    console.log('클릭 및 팝업 처리 완료!');
+    switch (dialogResult) {
+      case 'native-accepted':
+        console.log('클릭 및 팝업 처리 완료! (네이티브 확인)');
+        break;
+      case 'dom-confirmed':
+        console.log('클릭 및 팝업 처리 완료! (확인 버튼 클릭)');
+        break;
+      case 'dom-canceled':
+        console.log('클릭 및 팝업 처리 완료! (취소 버튼 클릭)');
+        break;
+      case 'dom-no-surface':
+        console.log('클릭 완료! (팝업 surface 없음)');
+        break;
+      case 'dom-error':
+        console.log('클릭 완료! (팝업 처리 중 오류 감지)');
+        break;
+      default:
+        console.log('클릭 완료! (팝업 탐색 시간 초과)');
+        break;
+    }
     await ctx.close();
   } catch (err) {
     console.error('실행 중 오류:', err);

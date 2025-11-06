@@ -134,17 +134,57 @@ async function resolveScopeWithAlt(page: Page, alt: string, maxWait = 20000): Pr
 }
 
 // ===== 팝업 surface 대기 (가장 위에 뜬 visible surface 선택) =====
-async function waitForDialogSurface(scope: Scope, timeoutMs: number): Promise<Locator> {
-  const surfaces = scope.locator('.javascriptMaterialdesignGm3WizDialog-dialog__surface');
-  await surfaces.last().waitFor({ state: 'visible', timeout: timeoutMs });
-  return surfaces.filter({ has: scope.locator(':scope') }).last();
+const DIALOG_SURFACE_SELECTORS = [
+  '.javascriptMaterialdesignGm3WizDialog-dialog__surface',
+  '.VfPpkd-dgl2Hf-ppHlrf-sM5MNb',
+  '.VfPpkd-Jh9lGc',
+  '[role="dialog"]',
+].join(',');
+
+async function waitForDialogSurface(scope: Scope, page: Page, timeoutMs: number): Promise<Locator> {
+  const uniqueRoots: Scope[] = [];
+  const pushRoot = (root: Scope) => {
+    if (!uniqueRoots.includes(root)) uniqueRoots.push(root);
+  };
+
+  pushRoot(scope);
+  pushRoot(page);
+
+  const pickVisibleSurface = async (root: Scope): Promise<Locator | null> => {
+    const surfaces = root.locator(DIALOG_SURFACE_SELECTORS);
+    const count = await surfaces.count().catch(() => 0);
+    for (let idx = count - 1; idx >= 0; idx -= 1) {
+      const candidate = surfaces.nth(idx);
+      if (await candidate.isVisible().catch(() => false)) {
+        return candidate;
+      }
+    }
+    return null;
+  };
+
+  const start = Date.now();
+  const pollDelay = 200;
+  while (Date.now() - start < timeoutMs) {
+    for (const root of uniqueRoots) {
+      const surface = await pickVisibleSurface(root);
+      if (surface) {
+        await surface.waitFor({ state: 'visible', timeout: 1000 }).catch(() => {});
+        if (root !== scope) {
+          console.log('[확인] surface를 페이지 루트에서 감지했습니다. (scope 외부 팝업)');
+        }
+        return surface;
+      }
+    }
+    await page.waitForTimeout(pollDelay);
+  }
+  throw new Error('팝업 surface를 찾지 못했습니다.');
 }
 
 // ===== ripple 포함 “취소” 버튼만 클릭 (surface 내부 한정) =====
 async function clickCancelIfPresent(scope: Scope, page: Page, timeoutMs = 10000): Promise<boolean> {
   let surface: Locator;
   try {
-    surface = await waitForDialogSurface(scope, timeoutMs);
+    surface = await waitForDialogSurface(scope, page, timeoutMs);
   } catch {
     console.log('[취소] surface 미등장 → 스킵');
     return false;
@@ -230,7 +270,7 @@ async function waitAndConfirm(scope: Scope, page: Page, timeoutMs: number): Prom
   const domP = (async () => {
     let surface: Locator;
     try {
-      surface = await waitForDialogSurface(scope, timeoutMs);
+      surface = await waitForDialogSurface(scope, page, timeoutMs);
     } catch {
       domNoSurface = true;
       return;

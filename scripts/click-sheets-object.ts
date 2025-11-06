@@ -373,17 +373,7 @@ async function waitAndConfirm(scope: Scope, page: Page, timeoutMs: number): Prom
       .first();
     await overlay.waitFor({ state: 'visible', timeout: 10000 });
 
-    const container = overlay.locator('> div.waffle-borderless-embedded-object-container').first();
-    const target = (await container.count()) > 0 ? container : overlay;
-    await target.scrollIntoViewIfNeeded();
-
-    try {
-      await target.click({ delay: 60 });
-    } catch {
-      const box = await target.boundingBox();
-      if (!box) throw new Error('타겟 요소의 boundingBox를 얻지 못했습니다.');
-      await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2, { delay: 60 });
-    }
+    await clickOverlayAndVerify(overlay, page, OBJECT_ALT);
 
     // 첫 상황 기록용 스크린샷
     const firstShot = ssPath('before_any');
